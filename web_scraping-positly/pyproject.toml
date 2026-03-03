@@ -1,19 +1,30 @@
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
 [project]
 name = "web-scraping-positly"
 version = "0.1.0"
-description = ""
+description = "Web scraping project with Positly"
 authors = [
-    {name = "hudson_silverio",email = "hudsonpksj@gmail.com"}
+    {name = "hudson_silverio", email = "hudsonpksj@gmail.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "requests>=2.32.0",
+    "lxml>=5.4.0",
+    "pandas>=2.3.0",
+    "numpy>=2.3.0",
+    "beautifulsoup4>=4.12.0",
+    "python-docx>=1.1.0",
+    "PyPDF2>=3.0.0",
+    "openpyxl (>=3.1.5,<4.0.0)",
+    "selenium (>=4.41.0,<5.0.0)",
+    "webdriver-manager (>=4.0.2,<5.0.0)",
 ]
 
-[tool.poetry]
-packages = [{include = "web_scraping_positly", from = "src"}]
-
-
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+]
