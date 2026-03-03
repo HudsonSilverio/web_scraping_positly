@@ -1,0 +1,19 @@
+[project]
+name = "web-scraping-positly"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "hudson_silverio",email = "hudsonpksj@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+]
+
+[tool.poetry]
+packages = [{include = "web_scraping_positly", from = "src"}]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
