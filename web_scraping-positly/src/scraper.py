@@ -5,12 +5,15 @@
 # Step 4: Find names + emails together (contacts)
 # Step 5: Handle pagination (multiple pages)
 # Step 6: Handle Scenario 3 (click links with Selenium)
+# Step 7: Error handling + errors_log.csv
 
 import pandas as pd                                        # library to read Excel files
 import os                                                  # library to work with file paths
 import time                                                # library to add waiting time between requests
 import requests                                            # library to open URLs and download HTML
 import re                                                  # library to find patterns in text
+import csv                                                 # library to write CSV files
+from datetime import datetime                              # library to get current date and time
 from bs4 import BeautifulSoup                              # library to read HTML structure
 from selenium import webdriver                             # controls Chrome browser
 from selenium.webdriver.chrome.service import Service      # manages Chrome driver
@@ -298,33 +301,26 @@ def get_next_page_url(html, current_url):
     if page_match:
         current_page_num = int(page_match.group(1))
         next_page_num = current_page_num + 1
+        # Keep the FULL URL and only replace the page number
         next_url = re.sub(r'page=\d+', f'page={next_page_num}', current_url)
-
-        # Stop if page has no results
-        no_results_signs = [
-            'no results', 'no people found',
-            'no records', '0 results', 'nothing found'
-        ]
-        page_text = soup.get_text().lower()
-        if any(sign in page_text for sign in no_results_signs):
-            return None
-
         return next_url
 
+    # No pagination pattern found
     return None
 
 
 def scrape_all_pages(start_url):
     """
     Scrapes ALL pages of a paginated site starting from start_url.
-    Returns a list of all contacts found across all pages.
+    Stops automatically after 2 consecutive empty pages.
     start_url = the first page URL
     """
 
-    all_contacts = []   # store all contacts from all pages
+    all_contacts = []       # store all contacts from all pages
     current_url = start_url
     page_number = 1
-    max_pages = 20      # safety limit to avoid infinite loops
+    max_pages = 20          # safety limit to avoid infinite loops
+    empty_pages_count = 0   # counts consecutive empty pages
 
     while current_url and page_number <= max_pages:
 
@@ -341,6 +337,17 @@ def scrape_all_pages(start_url):
         contacts = find_contacts(html, start_url)
         all_contacts.extend(contacts)
         print(f'  ✅ Found {len(contacts)} contacts on page {page_number}')
+
+        # Count consecutive empty pages
+        if len(contacts) == 0:
+            empty_pages_count += 1
+        else:
+            empty_pages_count = 0  # reset counter when page has contacts
+
+        # Stop if 2 consecutive pages are empty
+        if empty_pages_count >= 2:
+            print(f'  🏁 2 consecutive empty pages — stopping pagination')
+            break
 
         # Look for the next page
         next_url = get_next_page_url(html, current_url)
@@ -391,7 +398,7 @@ def get_selenium_driver():
 
 def scrape_with_clicks(start_url):
     """
-    Opens a page, finds profile links, clicks each one,
+    Opens a page with Selenium, finds profile links, clicks each one,
     and collects name + email from each profile page.
     Used for Scenario 3 where emails are hidden behind a click.
     start_url = the main listing page URL
@@ -482,18 +489,15 @@ def scrape_with_clicks(start_url):
                 # Look through ALL h1 tags and skip cookie-related ones
                 for h1 in profile_soup.find_all('h1'):
                     h1_text = h1.get_text(strip=True)
-                    # Skip if the h1 contains any cookie-related word
                     if not any(word in h1_text.lower() for word in skip_words):
                         name = h1_text
                         break  # use the first valid h1 found
 
+                # --- Clean the name ---
                 # Remove titles at the START of the name
-                # Example: Professor Suzanne Higgs → Suzanne Higgs
                 name = re.sub(r'^(Professor|Prof|Dr|Mr|Mrs|Ms|Miss)\s+', '', name)
 
                 # Remove credentials at the END of the name
-                # Example: Sally AdamsBSc (hons), FHEA → Sally Adams
-                # This removes everything from the first credential pattern onward
                 name = re.sub(r'(BSc|MSc|PhD|BA|MA|DSc|FHEA|FBA|CPsychol|FBPsS|C\.Psychol).*$', '', name)
 
                 # Remove leftover commas and special characters
@@ -548,30 +552,145 @@ def scrape_with_clicks(start_url):
     return all_contacts
 
 
+def log_error(url, error_type, error_message, retry_count, filepath):
+    """
+    Saves a failed URL to the errors_log.csv file.
+    url           = the URL that failed
+    error_type    = TIMEOUT, NOT_FOUND, NO_EMAIL, BLOCKED, UNKNOWN
+    error_message = the detailed error message
+    retry_count   = how many times we tried before giving up
+    filepath      = path to the errors_log.csv file
+    """
+
+    # Check if the file already exists to decide if we need to write the header
+    file_exists = os.path.isfile(filepath)
+
+    # Open the file in append mode (add new rows without deleting old ones)
+    with open(filepath, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=[
+            'url', 'error_type', 'error_message', 'timestamp', 'retry_count'
+        ])
+
+        # Write the header only if the file is new
+        if not file_exists:
+            writer.writeheader()
+
+        # Write the error row
+        writer.writerow({
+            'url':           url,
+            'error_type':    error_type,
+            'error_message': error_message,
+            'timestamp':     datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'retry_count':   retry_count
+        })
+
+
+def scrape_url_safe(url, errors_log_path):
+    """
+    Safely scrapes a single URL handling all possible errors.
+    Automatically detects which scenario the URL needs.
+    url             = the URL to scrape
+    errors_log_path = path to save errors_log.csv
+    """
+
+    print(f'\n🔍 Scraping: {url}')
+
+    try:
+        # --- First try with simple requests (fast) ---
+        html = get_page_html(url)
+
+        # If requests failed, try with Selenium (slower but more powerful)
+        if not html:
+            print(f'  ⚠️  requests failed — trying Selenium...')
+            contacts = scrape_with_clicks(url)
+
+            if not contacts:
+                log_error(
+                    url=url,
+                    error_type='BLOCKED',
+                    error_message='Both requests and Selenium failed to load the page',
+                    retry_count=3,
+                    filepath=errors_log_path
+                )
+                return []
+
+            return contacts
+
+        # --- requests worked — check if emails exist on this page ---
+        contacts = find_contacts(html, url)
+
+        if contacts:
+            # Check if there are more pages (pagination)
+            next_url = get_next_page_url(html, url)
+
+            if next_url and next_url != url:
+                # Scenario 2: has pagination
+                print(f'  📄 Pagination detected — scraping all pages...')
+                contacts = scrape_all_pages(url)
+            else:
+                # Scenario 1: no pagination
+                print(f'  ✅ Found {len(contacts)} contacts (no pagination)')
+
+        else:
+            # Scenario 3: no emails visible — try clicking links
+            print(f'  ⚠️  No emails on page — trying profile links with Selenium...')
+            contacts = scrape_with_clicks(url)
+
+            if not contacts:
+                log_error(
+                    url=url,
+                    error_type='NO_EMAIL',
+                    error_message='Page loaded but no emails found after clicking links',
+                    retry_count=1,
+                    filepath=errors_log_path
+                )
+                return []
+
+        return contacts
+
+    except Exception as e:
+        print(f'  ❌ Unexpected error: {e}')
+        log_error(
+            url=url,
+            error_type='UNKNOWN',
+            error_message=str(e),
+            retry_count=1,
+            filepath=errors_log_path
+        )
+        return []
+
+
 # --- TEST: run this file directly to see if it works ---
 if __name__ == '__main__':
 
-    # Find the correct path to links.xlsx
+    # Find the correct paths
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     filepath = os.path.join(BASE_DIR, '..', 'data', 'links.xlsx')
+    errors_log_path = os.path.join(BASE_DIR, '..', 'data', 'errors_log.csv')
 
     # Step 1: load the URLs
     urls = load_urls(filepath)
     print(f'✅ Step 1 OK — Total URLs loaded: {len(urls)}')
     print()
 
-    # Step 6 TEST: Birmingham requires clicking profile links
-    test_url = urls[61]  # Birmingham
-    print(f'🤖 Step 6 — Testing Selenium with: {test_url}')
-    print()
+    # Test with 3 different scenarios
+    test_urls = [
+        urls[10],   # Yale       → Scenario 1 (emails visible)
+        urls[69],   # Pittsburgh → Scenario 2 (pagination)
+        urls[61],   # Birmingham → Scenario 3 (click links)
+    ]
 
-    contacts = scrape_with_clicks(test_url)
+    all_contacts = []
+
+    for test_url in test_urls:
+        contacts = scrape_url_safe(test_url, errors_log_path)
+        all_contacts.extend(contacts)
+        print(f'  → Collected {len(contacts)} contacts from this URL')
 
     print()
-    print(f'✅ Step 6 OK — Total contacts found: {len(contacts)}')
-    print()
-    print('First 3 contacts:')
-    for c in contacts[:3]:
-        print(f'   Name:  {c["full_name"]}')
-        print(f'   Email: {c["email"]}')
-        print(f'   ────────────────────────────')
+    print(f'✅ Total contacts collected: {len(all_contacts)}')
+
+    if os.path.isfile(errors_log_path):
+        print(f'📋 errors_log.csv exists — some URLs had errors')
+    else:
+        print(f'✅ No errors logged — all URLs worked!')
