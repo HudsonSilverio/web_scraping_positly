@@ -4,13 +4,20 @@
 # Step 3: Find emails inside the HTML
 # Step 4: Find names + emails together (contacts)
 # Step 5: Handle pagination (multiple pages)
+# Step 6: Handle Scenario 3 (click links with Selenium)
 
-import pandas as pd             # library to read Excel files
-import os                       # library to work with file paths
-import time                     # library to add waiting time between requests
-import requests                 # library to open URLs and download HTML
-import re                       # library to find patterns in text
-from bs4 import BeautifulSoup   # library to read HTML structure
+import pandas as pd                                        # library to read Excel files
+import os                                                  # library to work with file paths
+import time                                                # library to add waiting time between requests
+import requests                                            # library to open URLs and download HTML
+import re                                                  # library to find patterns in text
+from bs4 import BeautifulSoup                              # library to read HTML structure
+from selenium import webdriver                             # controls Chrome browser
+from selenium.webdriver.chrome.service import Service      # manages Chrome driver
+from selenium.webdriver.common.by import By                # finds elements on page
+from selenium.webdriver.support.ui import WebDriverWait    # waits for page to load
+from selenium.webdriver.support import expected_conditions as EC  # wait conditions
+from webdriver_manager.chrome import ChromeDriverManager   # installs Chrome driver automatically
 
 
 def load_urls(filepath):
@@ -350,6 +357,197 @@ def scrape_all_pages(start_url):
     return all_contacts
 
 
+def get_selenium_driver():
+    """
+    Creates and returns a Selenium Chrome browser in hidden mode.
+    We use headless mode so Chrome runs invisibly in the background.
+    """
+
+    # Configure Chrome options
+    options = webdriver.ChromeOptions()
+
+    # Run Chrome invisibly in the background (no window opens)
+    options.add_argument('--headless')
+
+    # Disable GPU (required for headless mode on Windows)
+    options.add_argument('--disable-gpu')
+
+    # Set window size so the page renders correctly
+    options.add_argument('--window-size=1920,1080')
+
+    # Pretend to be a real Chrome browser
+    options.add_argument(
+        'user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    )
+
+    # Automatically download and install the correct Chrome driver
+    service = Service(ChromeDriverManager().install())
+
+    # Create and return the browser
+    driver = webdriver.Chrome(service=service, options=options)
+    return driver
+
+
+def scrape_with_clicks(start_url):
+    """
+    Opens a page, finds profile links, clicks each one,
+    and collects name + email from each profile page.
+    Used for Scenario 3 where emails are hidden behind a click.
+    start_url = the main listing page URL
+    """
+
+    all_contacts = []   # store all contacts found
+    driver = None       # browser starts as None
+
+    try:
+        # Start the Chrome browser
+        print(f'  🌐 Opening Chrome browser...')
+        driver = get_selenium_driver()
+
+        # Open the main page
+        driver.get(start_url)
+
+        # Wait up to 10 seconds for the page to load
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.TAG_NAME, 'body'))
+        )
+
+        # Get the page HTML and parse it
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+        # --- Find all profile links on the main page ---
+        profile_links = []
+        for tag in soup.find_all('a', href=True):
+            href = tag['href']
+
+            # Build full URL if it is a relative link
+            if href.startswith('/'):
+                domain = '/'.join(start_url.split('/')[:3])
+                href = domain + href
+
+            # Only keep links that look like profile pages
+            if any(word in href.lower() for word in [
+                '/people/', '/staff/', '/faculty/', '/person/',
+                '/profile/', '/academics/', '/directory/'
+            ]):
+                # Avoid links that go back to the listing page
+                if href != start_url and href not in profile_links:
+                    profile_links.append(href)
+
+        print(f'  🔗 Found {len(profile_links)} profile links')
+
+        # --- Visit each profile page and collect contact info ---
+        for i, profile_url in enumerate(profile_links[:50], 1):  # limit to 50 profiles
+
+            try:
+                # Open the profile page
+                driver.get(profile_url)
+
+                # Wait for the page to load
+                WebDriverWait(driver, 8).until(
+                    EC.presence_of_element_located((By.TAG_NAME, 'body'))
+                )
+
+                # Get the profile page HTML
+                profile_soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+                # --- Find email on this profile page ---
+                email = ''
+
+                # Strategy 1: look for mailto link
+                mailto = profile_soup.find('a', href=lambda h: h and h.startswith('mailto:'))
+                if mailto:
+                    email = mailto['href'].replace('mailto:', '').strip().lower()
+
+                # Strategy 2: look for email in plain text
+                if not email:
+                    page_text = profile_soup.get_text()
+                    email_match = re.search(
+                        r'[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+',
+                        page_text
+                    )
+                    if email_match:
+                        email = email_match.group(0).lower()
+
+                # --- Find name on this profile page ---
+                name = ''
+
+                # Words that indicate a cookie popup or non-name h1
+                skip_words = [
+                    'cookie', 'privacy', 'consent', 'your choice',
+                    'we use', 'accept', 'policy'
+                ]
+
+                # Look through ALL h1 tags and skip cookie-related ones
+                for h1 in profile_soup.find_all('h1'):
+                    h1_text = h1.get_text(strip=True)
+                    # Skip if the h1 contains any cookie-related word
+                    if not any(word in h1_text.lower() for word in skip_words):
+                        name = h1_text
+                        break  # use the first valid h1 found
+
+                # Remove titles at the START of the name
+                # Example: Professor Suzanne Higgs → Suzanne Higgs
+                name = re.sub(r'^(Professor|Prof|Dr|Mr|Mrs|Ms|Miss)\s+', '', name)
+
+                # Remove credentials at the END of the name
+                # Example: Sally AdamsBSc (hons), FHEA → Sally Adams
+                # This removes everything from the first credential pattern onward
+                name = re.sub(r'(BSc|MSc|PhD|BA|MA|DSc|FHEA|FBA|CPsychol|FBPsS|C\.Psychol).*$', '', name)
+
+                # Remove leftover commas and special characters
+                name = re.sub(r'[,»]+', '', name)
+
+                # Remove extra spaces
+                name = re.sub(r'\s+', ' ', name).strip()
+
+                # Use email username as fallback if no name found
+                if not name and email:
+                    username = email.split('@')[0]
+                    name = username.replace('.', ' ').replace('-', ' ').title()
+
+                # Only save if we found at least an email
+                if email and '@' in email:
+
+                    # Extract university from URL
+                    domain = start_url.split('/')[2]
+                    university = domain.replace('www.', '').split('.')[1].title()
+
+                    contact = {
+                        'full_name':        name,
+                        'university_name':  university,
+                        'department':       'Psychology',
+                        'department_url':   start_url,
+                        'email':            email,
+                        'research_lines':   '',
+                        'confidence_score': 1.0 if name and email else 0.5
+                    }
+                    all_contacts.append(contact)
+                    print(f'  ✅ [{i}] {name} → {email}')
+                else:
+                    print(f'  ⚠️  [{i}] No email found on: {profile_url}')
+
+                # Wait 1 second between profile pages to be polite
+                time.sleep(1)
+
+            except Exception as e:
+                # If one profile fails, skip it and continue
+                print(f'  ❌ [{i}] Failed to load profile: {e}')
+                continue
+
+    except Exception as e:
+        print(f'  ❌ Selenium error: {e}')
+
+    finally:
+        # Always close the browser when done
+        if driver:
+            driver.quit()
+            print(f'  🔒 Browser closed')
+
+    return all_contacts
+
+
 # --- TEST: run this file directly to see if it works ---
 if __name__ == '__main__':
 
@@ -362,18 +560,18 @@ if __name__ == '__main__':
     print(f'✅ Step 1 OK — Total URLs loaded: {len(urls)}')
     print()
 
-    # Step 5 TEST: Pittsburgh has pagination and does not block requests
-    test_url = urls[69]  # Pittsburgh
-    print(f'📄 Step 5 — Testing pagination with: {test_url}')
+    # Step 6 TEST: Birmingham requires clicking profile links
+    test_url = urls[61]  # Birmingham
+    print(f'🤖 Step 6 — Testing Selenium with: {test_url}')
     print()
 
-    all_contacts = scrape_all_pages(test_url)
+    contacts = scrape_with_clicks(test_url)
 
     print()
-    print(f'✅ Step 5 OK — Total contacts found across all pages: {len(all_contacts)}')
+    print(f'✅ Step 6 OK — Total contacts found: {len(contacts)}')
     print()
     print('First 3 contacts:')
-    for c in all_contacts[:3]:
+    for c in contacts[:3]:
         print(f'   Name:  {c["full_name"]}')
         print(f'   Email: {c["email"]}')
         print(f'   ────────────────────────────')
