@@ -1,86 +1,120 @@
 # main.py
-# Job: connects everything and runs the full ETL pipeline
-# E = Extract  → scraper.py collects contacts from all URLs
-# T = Transform → cleaner.py cleans the raw data
-# L = Load      → saves final contacts_output.csv
+# Job: runs the FULL pipeline in one command
+#
+# Phase 0 — link_collector: reads universities.csv → finds department URLs → saves links.xlsx
+# Phase 1 — scraper:        collects emails from all URLs
+# Phase 2 — cleaner:        cleans the raw data
+# Phase 3 — save:           saves final contacts_output.csv
 
-import os                          # library to work with file paths
-from scraper import load_urls      # import our function to read links.xlsx
-from scraper import scrape_url_safe  # import our function to scrape each URL
-from cleaner import clean_contacts   # import our function to clean the data
-from cleaner import save_to_csv      # import our function to save the CSV
+import os
+from link_collector import get_university_names
+from link_collector import search_psychology_department
+from link_collector import find_people_links
+from link_collector import save_links_to_excel
+from scraper import load_urls
+from scraper import scrape_url_safe
+from cleaner import clean_contacts
+from cleaner import save_to_csv
 
 
-def run_pipeline(urls_filepath, output_filepath, errors_log_filepath):
-    """
-    Runs the full ETL pipeline:
-    1. Reads all URLs from links.xlsx
-    2. Scrapes each URL collecting contacts
-    3. Cleans all collected contacts
-    4. Saves final CSV file
-    urls_filepath       = path to links.xlsx
-    output_filepath     = path to save contacts_output.csv
-    errors_log_filepath = path to save errors_log.csv
-    """
+def run_pipeline(universities_filepath, links_filepath, output_filepath, errors_log_filepath):
 
     print('=' * 60)
-    print('  🚀 STARTING WEB SCRAPING PIPELINE')
+    print('  🚀 FULL PIPELINE STARTING')
     print('=' * 60)
     print()
 
     # ─────────────────────────────────────────
-    # STEP E — EXTRACT
+    # PHASE 0 — FIND LINKS AUTOMATICALLY
     # ─────────────────────────────────────────
 
-    # Load all URLs from links.xlsx
-    # urls = load_urls(urls_filepath)
-    urls = load_urls(urls_filepath)[:5]
+    print('📍 PHASE 0 — Reading universities and finding department URLs...')
+    print()
+
+    # Step 0.1: Read university names from CSV
+    names = get_university_names(universities_filepath)
+    print(f'✅ Universities loaded: {len(names)}')
+    print()
+
+    # Step 0.2 + 0.3: For each university, find department URL and people links
+    all_new_links = []
+
+    for name in names[:5]:  # ← mude para names para rodar todas
+        print(f'  🏛️  {name}')
+
+        dept_url = search_psychology_department(name)
+
+        if not dept_url:
+            print(f'  ❌ Department not found')
+            print()
+            continue
+
+        print(f'  🔗 {dept_url}')
+
+        people_links = find_people_links(dept_url)
+        print(f'  👥 People links: {len(people_links)}')
+
+        all_new_links.extend(people_links)
+        print()
+
+    # Step 0.4: Save all links to links.xlsx
+    save_links_to_excel(all_new_links, links_filepath)
+
+    print()
+    print('=' * 60)
+    print(f'✅ PHASE 0 DONE — Links saved to links.xlsx')
+    print('=' * 60)
+    print()
+
+    # ─────────────────────────────────────────
+    # PHASE 1 — EXTRACT
+    # ─────────────────────────────────────────
+
+    print('📍 PHASE 1 — Scraping emails from all URLs...')
+    print()
+
+    urls = load_urls(links_filepath)
     total_urls = len(urls)
     print(f'📋 Total URLs to scrape: {total_urls}')
     print()
 
-    # List to store ALL contacts from ALL URLs
     all_contacts = []
 
-    # Loop through each URL one by one
     for i, url in enumerate(urls, 1):
 
-        print(f'[{i}/{total_urls}] ', end='')  # show progress like [1/82]
+        print(f'[{i}/{total_urls}] ', end='')
 
-        # Scrape the URL safely (handles all 3 scenarios + errors)
         contacts = scrape_url_safe(url, errors_log_filepath)
-
-        # Add contacts from this URL to our main list
         all_contacts.extend(contacts)
 
         print(f'  → Total so far: {len(all_contacts)} contacts')
         print()
 
     print('=' * 60)
-    print(f'✅ EXTRACTION DONE — Raw contacts collected: {len(all_contacts)}')
+    print(f'✅ PHASE 1 DONE — Raw contacts collected: {len(all_contacts)}')
     print('=' * 60)
     print()
 
     # ─────────────────────────────────────────
-    # STEP T — TRANSFORM
+    # PHASE 2 — TRANSFORM
     # ─────────────────────────────────────────
 
-    print('🧹 Cleaning the data...')
+    print('📍 PHASE 2 — Cleaning the data...')
     print()
 
     clean = clean_contacts(all_contacts)
 
     print()
     print('=' * 60)
-    print(f'✅ CLEANING DONE — Clean contacts: {len(clean)}')
+    print(f'✅ PHASE 2 DONE — Clean contacts: {len(clean)}')
     print('=' * 60)
     print()
 
     # ─────────────────────────────────────────
-    # STEP L — LOAD
+    # PHASE 3 — LOAD
     # ─────────────────────────────────────────
 
-    print('💾 Saving final CSV file...')
+    print('📍 PHASE 3 — Saving final CSV...')
     print()
 
     save_to_csv(clean, output_filepath)
@@ -89,29 +123,23 @@ def run_pipeline(urls_filepath, output_filepath, errors_log_filepath):
     print('=' * 60)
     print('  🏆 PIPELINE COMPLETE!')
     print(f'  📊 Total contacts saved: {len(clean)}')
-    print(f'  📁 Output file: {output_filepath}')
+    print(f'  📁 File: {output_filepath}')
 
-    # Check if any errors were logged
     if os.path.isfile(errors_log_filepath):
         print(f'  ⚠️  Some URLs failed — check: {errors_log_filepath}')
     else:
-        print(f'  ✅ No errors — all URLs scraped successfully!')
+        print(f'  ✅ No errors!')
 
     print('=' * 60)
 
 
-# --- MAIN ENTRY POINT ---
 if __name__ == '__main__':
 
-    # Find the correct paths automatically
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-    # Input file
-    urls_filepath = os.path.join(BASE_DIR, '..', 'data', 'links.xlsx')
+    universities_filepath = os.path.join(BASE_DIR, '..', 'data', 'universities.csv')
+    links_filepath        = os.path.join(BASE_DIR, '..', 'data', 'links.xlsx')
+    output_filepath       = os.path.join(BASE_DIR, '..', 'data', 'contacts_output.csv')
+    errors_log_filepath   = os.path.join(BASE_DIR, '..', 'data', 'errors_log.csv')
 
-    # Output files
-    output_filepath = os.path.join(BASE_DIR, '..', 'data', 'contacts_output.csv')
-    errors_log_filepath = os.path.join(BASE_DIR, '..', 'data', 'errors_log.csv')
-
-    # Run the full pipeline
-    run_pipeline(urls_filepath, output_filepath, errors_log_filepath)
+    run_pipeline(universities_filepath, links_filepath, output_filepath, errors_log_filepath)
